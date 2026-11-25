@@ -392,7 +392,8 @@ class Das:
 #          high byte (for example 0x5400 = colour 0x54)
 #        - the remaining words (per-vertex shading values and other parameters) are not decoded; there are no
 #          texture coordinates at all: the game tiles the texture over the face
-#   the data ends with a last unused face (n = 0) and a few bytes of an incomplete record
+#   the count field of a face is not always right (0, or 3 for a quad), so the length of the vertex list is used;
+#   the data ends inside the very last record: only its vertex list is present, so it takes the texture of the previous face
 # ==========================================================================
 
 def parse_model(blob: bytes):
@@ -406,15 +407,23 @@ def parse_model(blob: bytes):
     vertices = [struct.unpack_from("<hhh", blob, 22 + 16 * k) for k in range(count)]
     pos = 20 + 16 * count + 64                       # skip the vertex table and the 64 byte tag record
     faces = []
-    while pos + 24 <= len(blob):
+    last_texture = None
+    while pos + 12 <= len(blob):
         w = struct.unpack_from("<%dh" % min(40, (len(blob) - pos) // 2), blob, pos)
         j = next((k for k in range(3, 9) if k < len(w) and w[k] == w[0]), None)    # entry that closes the list
-        if j is None or j + 7 >= len(w):
+        if j is None or not all(r % 16 == 0 and 0 <= r < 16 * count for r in w[:j]):
             break
-        n, texture = w[j + 6], w[j + 7]
-        if not 3 <= n <= j + 1 or not all(r % 16 == 0 and 0 <= r < 16 * count for r in w[:n]):
+        complete = j + 7 < len(w)                    # False for the last record: the data ends inside it
+        # The number of vertices is the length of the list (it ends with a repeat of the first entry). The count
+        # field after the list is not reliable: a few records have a wrong value there (0, or 3 for a quad).
+        n = j
+        texture = w[j + 7] if complete else last_texture   # a record cut short by the end of the data reuses the previous texture
+        if texture is None:
             break
         faces.append(([r // 16 for r in w[:n]], texture))
+        last_texture = texture
+        if not complete:
+            break
         pos += 2 * (j + 1) + 54
     return vertices, faces
 
