@@ -7,7 +7,7 @@ A Python tool that extracts textures, sprites, 3D models, level maps and interfa
 Point it at a folder with the game's data files and it converts everything it recognises into common formats:
 
 - **Textures and sprites** from the texture packs (`.MGL` / `.DAS`) are saved as GIF files. Animated textures stay animated, and transparency is kept.
-- **3D models** stored inside the packs (for example the sofa and the broken pipe) are exported as Wavefront OBJ files with an MTL material file and PNG textures.
+- **3D models** stored inside the packs are exported as Wavefront OBJ files with an MTL material file and PNG textures.
 - **Level maps** (`.RAW`) are drawn as floor plans in PNG format: textured floors, solid walls, steps, portals between sectors and the outlines of objects.
 - **Full-screen pictures** (papers, menus, manuals), the **inventory icons** and the **bitmap fonts** are saved as GIF files.
 
