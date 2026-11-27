@@ -99,6 +99,25 @@ SCREEN_SIZES = {64000: (320, 200), 256000: (640, 400),
 # Files that are a vertical stack of equally sized cells: file name -> (cell width, cell height).
 SPRITE_SHEETS = {"ICONS": (32, 32)}
 
+# Interface files that are several sprites stored one after another, without any header. The sizes were read
+# from the drawing code of NORM.EXE (every sprite is drawn by a routine that gets its offset, width and height
+# as constants), and in every file the sprites add up to exactly the size of the file.
+# stem -> (kind, [(name, count, width, height), ...]); the pixels of a sprite are stored row by row, palette
+# index 0 is transparent and the colours come from the common interface palette.
+SPRITE_PACKS = {
+    "RUCKSACK": ("animation", [("frame", 16, 30, 25)]),
+    "ICONPANL": ("sprites", [("small", 4, 28, 21), ("medium", 2, 61, 37), ("large", 1, 35, 45), ("panel", 1, 248, 179)]),
+    "ICONPAN2": ("sprites", [("panel", 1, 248, 179)]),
+    "ICONPAN3": ("sprites", [("panel", 1, 248, 179)]),
+    "MICON": ("sprites", [("a", 2, 47, 59), ("b", 2, 37, 40), ("c", 2, 33, 30), ("d", 2, 37, 24),
+                          ("e", 2, 61, 30), ("body", 1, 129, 150)]),
+    "KEYLO": ("sprites", [("digit", 10, 14, 15), ("key", 12, 31, 26), ("lamp", 2, 30, 16), ("body", 1, 130, 178)]),
+    "KEYPAD": ("sprites", [("digit", 10, 28, 29), ("key", 12, 62, 52), ("lamp", 2, 61, 33)]),
+    "ZOOMDTLO": ("sprites", [("a", 2, 57, 37), ("b", 4, 49, 32)]),
+    "ZOOMDATA": ("sprites", [("a", 2, 113, 75), ("b", 4, 98, 65)]),
+}
+ANIMATION_FRAME_MS = 100                           # the real speed is not known: the game steps it on a timer
+
 # Glyph cell size of the bitmap fonts, by the size of the decompressed data (verified on the real files).
 # Other sizes are guessed automatically.
 KNOWN_FONTS = {26208: (9, 13), 56000: (14, 20), 82320: (21, 20)}
@@ -570,15 +589,20 @@ def ui_palette():
 
 def parse_screen(data: bytes):
     """Recognise a full-screen picture: width * height palette indices (row by row) followed by a 512 byte
-    palette of 256 15-bit entries. Returns (width, height, pixels, palette) or None."""
-    n = len(data) - 512
-    if n not in SCREEN_SIZES:
-        return None
-    words = struct.unpack("<256H", data[n:])
-    if any(v & 0x8000 for v in words):                 # the top bit of a 15-bit colour is always 0
-        return None
-    w, h = SCREEN_SIZES[n]
-    return w, h, data[:n], words_to_palette(words)
+    palette of 256 15-bit entries. Some screens (options, save, map) have more data after the palette: pieces of
+    background and interface elements whose sizes are not stored in the file; they are not decoded.
+    Returns (width, height, pixels, palette, size of the extra data) or None."""
+    for n, (w, h) in SCREEN_SIZES.items():
+        if len(data) < n + 512:
+            continue
+        words = struct.unpack("<256H", data[n:n + 512])
+        if any(v & 0x8000 for v in words):             # the top bit of a 15-bit colour is always 0
+            continue
+        extra = len(data) - n - 512
+        if extra and len(set(words)) < 32:             # with extra data a real palette is required
+            continue
+        return w, h, data[:n], words_to_palette(words), extra
+    return None
 
 
 def tile_sheet(pix: bytes, w: int, h: int, cols: int):
@@ -696,6 +720,51 @@ def convert_sprite_sheet(data: bytes, stem: str, cell, out_root: Path) -> str:
     return "sheet of %d cells of %dx%d (%d non-empty, one file each in folder %s)" % (count, w, h, saved, stem)
 
 
+def convert_sprite_pack(data: bytes, stem: str, kind: str, groups, out_root: Path) -> str:
+    """Save a pack of sprites: a contact sheet (one row per group), every sprite as its own transparent GIF in a
+    folder, or for an animation one animated GIF."""
+    palette = ui_palette()
+    cells = []                                         # (name, width, height, pixels)
+    pos = 0
+    for name, count, w, h in groups:
+        for i in range(count):
+            cells.append((name, w, h, data[pos:pos + w * h]))
+            pos += w * h
+    out_root.mkdir(exist_ok=True)
+    if kind == "animation":
+        _, w, h, _ = cells[0]
+        frames = []
+        for _, _, _, pixels in cells:
+            img = Image.frombytes("P", (w, h), pixels)
+            img.putpalette(palette)
+            frames.append(img)
+        frames[0].save(out_root / (stem + ".gif"), save_all=True, append_images=frames[1:], duration=ANIMATION_FRAME_MS,
+                       loop=0, transparency=0, disposal=2, optimize=False)
+        return "animation of %d frames of %dx%d" % (len(cells), w, h)
+    gap = 2
+    rows, y = [], 0                                    # contact sheet: one row per group
+    for name, count, w, h in groups:
+        rows.append((y, name, count, w, h))
+        y += h + gap
+    sheet_w = max(count * (w + gap) - gap for _, _, count, w, _ in rows)
+    sheet = bytearray(sheet_w * (y - gap))
+    folder = out_root / stem
+    folder.mkdir(exist_ok=True)
+    k = 0
+    for y0, name, count, w, h in rows:
+        for i in range(count):
+            pixels = cells[k][3]
+            x0 = i * (w + gap)
+            for r in range(h):
+                o = (y0 + r) * sheet_w + x0
+                sheet[o:o + w] = pixels[r * w:(r + 1) * w]
+            k += 1
+            if any(pixels):
+                save_indexed(folder / ("%s_%02d.gif" % (name, i)), w, h, pixels, palette, transparent=True)
+    save_indexed(out_root / (stem + ".gif"), sheet_w, y - gap, bytes(sheet), palette)
+    return "pack of %d sprites (contact sheet, and one file each in folder %s)" % (len(cells), stem)
+
+
 def convert_font(data: bytes, out_path: Path) -> str:
     """Save a bitmap font as one sheet of 16 glyphs per row."""
     known = len(data) in KNOWN_FONTS
@@ -708,7 +777,7 @@ def convert_font(data: bytes, out_path: Path) -> str:
 
 
 def convert_screen(parsed, out_path: Path):
-    w, h, pixels, palette = parsed
+    w, h, pixels, palette = parsed[:4]
     save_indexed(out_path, w, h, pixels, palette)
 
 
@@ -726,12 +795,17 @@ def convert_file(mgl_path: Path, out_root: Path, model_root: Path) -> str:
     if screen:
         out_root.mkdir(exist_ok=True)
         convert_screen(screen, out_root / (mgl_path.stem + ".gif"))
-        return "full-screen picture %dx%d" % screen[:2]
+        note = ", %d bytes of extra data after the picture not decoded" % screen[4] if screen[4] else ""
+        return "full-screen picture %dx%d%s" % (screen[0], screen[1], note)
     stem = mgl_path.stem
     if stem.upper() in SPRITE_SHEETS:
         w, h = SPRITE_SHEETS[stem.upper()]
         if len(data) % (w * h) == 0:
             return convert_sprite_sheet(data, stem, SPRITE_SHEETS[stem.upper()], out_root)
+    if stem.upper() in SPRITE_PACKS:
+        kind, groups = SPRITE_PACKS[stem.upper()]
+        if sum(c * w * h for _, c, w, h in groups) == len(data):
+            return convert_sprite_pack(data, stem, kind, groups, out_root)
     if len(data) >= 1000 and max(data) <= 2 and any(data):
         return convert_font(data, out_root / (stem + ".gif"))
     raise ValueError("unrecognised format: %d bytes after decompression, starts with: %s"
